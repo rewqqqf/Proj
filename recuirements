@@ -1,1 +1,7 @@
-
+pymongo==4.7.1
+pymorphy2==0.9.1
+Solution==5.4.0
+telebot==0.0.5
+telegram==0.0.1
+python-dotenv==0.20.0
+python-telegram-bot==21.1.1
