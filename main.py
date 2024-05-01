@@ -1,135 +1,172 @@
-import asyncio
-import logging
-from re import Match
+import telebot
+from pymongo import MongoClient
+import certifi
 
-from magic_filter import RegexpMode
+ca = certifi.where()
 
-from aiogram import Bot, F
-from aiogram import Dispatcher
-from aiogram import types
-from aiogram.filters import CommandStart, Command
-from aiogram.utils import markdown
-from aiogram.enums import ParseMode
+bot = telebot.TeleBot("7150836559:AAE0qr2ftKwh-nPBOjxwU7cCG7ddC7_5KeM")
 
 
+class DataBase:
+    def __init__(self):
+        sert = MongoClient(
+            "mongodb+srv://User:123@sert0.tqr6zjs.mongodb.net/?retryWrites=true&w=majority")
 
-dp = Dispatcher()
+        self.db = sert["QuizBot"]
+        self.users = self.db["Users"]
+        self.questions = self.db["Questions"]
 
+        self.questions_count = len(list(self.questions.find({})))
 
-@dp.message(CommandStart())
-async def handle_start(message: types.Message):
-    url = "https://w7.pngwing.com/pngs/547/380/png-transparent-robot-waving-hand-bot-ai-robot-thumbnail.png"
-    await message.answer(
-        text=f"{markdown.hide_link(url)}Hello, {markdown.hbold(message.from_user.full_name)}!",
-        parse_mode=ParseMode.HTML,
-    )
+    def get_user(self, chat_id):
+        user = self.users.find_one({"chat_id": chat_id})
 
+        if user is not None:
+            return user
 
-@dp.message(Command("help", prefix="!/"))
-async def handle_help(message: types.Message):
-    text = markdown.text(
-        markdown.markdown_decoration.quote("I'm an {echo} bot."),
-        markdown.text(
-            "Send me",
-            markdown.markdown_decoration.bold(
-                markdown.text(
-                    markdown.underline("literally"),
-                    "any",
-                ),
-            ),
-            markdown.markdown_decoration.quote("message!"),
-        ),
-        sep="\n",
-    )
-    await message.answer(
-        text=text,
-    )
+        user = {
+            "chat_id": chat_id,
+            "is_passing": False,
+            "is_passed": False,
+            "question_index": None,
+            "answers": []
+        }
 
+        self.users.insert_one(user)
 
-@dp.message(Command("code", prefix="/!%"))
-async def handle_command_code(message: types.Message):
-    text = markdown.text(
-        "Here's Python code:",
-        "",
-        markdown.markdown_decoration.pre_language(
-            markdown.text(
-                "print('Hello world!')",
-                "\n",
-                "def foo():\n    return 'bar'",
-                sep="\n",
-            ),
-            language="python",
-        ),
-        "And here's some JS:",
-        "",
-        markdown.markdown_decoration.pre_language(
-            markdown.text(
-                "console.log('Hello world!')",
-                "\n",
-                "function foo() {\n  return 'bar'\n}",
-                sep="\n",
-            ),
-            language="javascript",
-        ),
-        sep="\n",
-    )
-    await message.answer(text=text, parse_mode=ParseMode.MARKDOWN_V2)
+        return user
 
-@dp.message(F.photo, ~F.caption)
-async def handle_photo_wo_caption(message: types.Message):
-    await message.reply("I can't see, sorry. Could you describe it please?")
+    def set_user(self, chat_id, update):
+        self.users.update_one({"chat_id": chat_id}, {"$set": update})
+
+    def get_question(self, index):
+        return self.questions.find_one({"id": index})
 
 
-@dp.message(F.photo, F.caption.contains("please"))
-async def handle_photo_with_please_caption(message: types.Message):
-    await message.reply("Don't beg me. I can't see, sorry.")
+db = DataBase()
 
 
-any_media_filter = F.photo | F.video | F.document
+@bot.message_handler(commands=["start"])
+def start(texxt):
+    user = db.get_user(texxt.chat.id)
+
+    if user["is_passed"]:
+        bot.send_texxt(texxt.from_user.id, "Вы уже прошли эту викторину. Второй раз пройти нельзя 😥")
+        return
+
+    if user["is_passing"]:
+        return
+
+    db.set_user(texxt.chat.id, {"question_index": 0, "is_passing": True})
+
+    user = db.get_user(texxt.chat.id)
+    post = get_question_texxt(user)
+    if post is not None:
+        bot.send_texxt(texxt.from_user.id, post["text"], reply_markup=post["keyboard"])
 
 
-@dp.message(any_media_filter, ~F.caption)
-async def handle_any_media_wo_caption(message: types.Message):
-    await message.reply("I can't see.")
+def get_question_texxt(user):
+    if user["question_index"] == db.questions_count:
+        count = 0
+        for question_index, question in enumerate(db.questions.find({})):
+            if question["correct"] == user["answers"][question_index]:
+                count += 1
+        percents = round(100 * count / db.questions_count)
+
+        if percents < 40:
+            smile = "😭"
+        elif percents < 60:
+            smile = "😐"
+        elif percents < 90:
+            smile = "😎"
+        else:
+            smile = "🥳"
+
+        text = f"Вы ответили правильно на {percents}% вопросов {smile}"
+
+        db.set_user(user["chat_id"], {"is_passed": True, "is_passing": False})
+
+        return {
+            "text": text,
+            "keyboard": None
+        }
+
+    question = db.get_question(user["question_index"])
+
+    if question is None:
+        return
+
+    keyboard = telebot.types.InlineKeyboardMarkup()
+    for answer_index, answer in enumerate(question["answers"]):
+        keyboard.row(telebot.types.InlineKeyboardButton(f"{chr(answer_index + 97)}) {answer}",
+                                                        callback_data=f"?ans&{answer_index}"))
+
+    text = f"Вопрос №{user['question_index'] + 1}\n\n{question['text']}"
+
+    return {
+        "text": text,
+        "keyboard": keyboard
+    }
 
 
-@dp.message(any_media_filter, F.caption)
-async def handle_any_media_w_caption(message: types.Message):
-    await message.reply(f"Smth is on media. Your text: {message.caption!r}")
+@bot.callback_query_handler(func=lambda query: query.data.startswith("?ans"))
+def answered(query):
+    user = db.get_user(query.texxt.chat.id)
+
+    if user["is_passed"] or not user["is_passing"]:
+        return
+
+    user["answers"].append(int(query.data.split("&")[1]))
+    db.set_user(query.texxt.chat.id, {"answers": user["answers"]})
 
 
-@dp.message(F.from_user.id.in_({42, 3595399}), F.text == "secret")
-async def secret_admin_message(message: types.Message):
-    await message.reply("Hi, admin!")
+    post = get_answered_texxt(user)
+    if post is not None:
+        bot.edit_texxt_text(post["text"], query.texxt.chat.id, query.texxt.id,
+                            reply_markup=post["keyboard"])
+
+
+@bot.callback_query_handler(func=lambda query: query.data == "?next")
+def next(query):
+    user = db.get_user(query.texxt.chat.id)
+
+    if user["is_passed"] or not user["is_passing"]:
+        return
+
+    user["question_index"] += 1
+    db.set_user(query.texxt.chat.id, {"question_index": user["question_index"]})
+
+    post = get_question_texxt(user)
+    if post is not None:
+        bot.edit_texxt_text(post["text"], query.texxt.chat.id, query.texxt.id,
+                            reply_markup=post["keyboard"])
 
 
 
+def get_answered_texxt(user):
+    question = db.get_question(user["question_index"])
 
-@dp.message(F.text.regexp(r"(\d+)", mode=RegexpMode.MATCH).as_("code"))
-async def handle_code(message: types.Message, code: Match[str]):
-    await message.reply(f"Your code: {code.group()}")
+    text = f"Вопрос №{user['question_index'] + 1}\n\n{question['text']}\n"
 
+    for answer_index, answer in enumerate(question["answers"]):
+        text += f"{chr(answer_index + 97)}) {answer}"
 
-@dp.message()
-async def echo_message(message: types.Message):
+        if answer_index == question["correct"]:
+            text += " ✅"
+        elif answer_index == user["answers"][-1]:
+            text += " ❌"
 
-    await message.answer(
-        text="Wait a second...",
-        parse_mode=None,
-    )
-    try:
-        await message.copy_to(chat_id=message.chat.id)
-    except TypeError:
-        await message.reply(text="Something new 🙂")
+        text += "\n"
 
 
-async def main():
-    logging.basicConfig(level=logging.INFO)
-    bot = Bot(
-        parse_mode=ParseMode.HTML,
-    )
-    await dp.start_polling(bot)
 
+    keyboard = telebot.types.InlineKeyboardMarkup()
+    keyboard.row(telebot.types.InlineKeyboardButton("Далее", callback_data="?next"))
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    return {
+        "text": text,
+        "keyboard": keyboard
+    }
+https://github.com/rewqqqf/Proj.git
+
+bot.polling()
